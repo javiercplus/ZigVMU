@@ -1,0 +1,371 @@
+#!/bin/bash
+
+# Script to launch QEMU with a graphical interface using yad
+# Allows to choose hard disk, ISO, RAM, CPU cores, EFI, CPU host, physical disk, boot control,
+# create virtual disks, and supports VirtIO graphics and audio
+
+QEMU_APPIMAGE="./QEMU-x86_64.AppImage"
+BIOS_FILE="OVMF_X64.fd"  # Path to EFI BIOS file
+
+# Check if yad is installed
+if ! command -v yad &> /dev/null; then
+    echo "Error: yad is not installed. Install it with your package manager (e.g. sudo apt install yad)"
+    exit 1
+fi
+
+# Check if the QEMU AppImage exists and is executable
+if [ ! -x "$QEMU_APPIMAGE" ]; then
+    yad --error --title="Error" --text="QEMU AppImage not found or not executable:\n$QEMU_APPIMAGE"
+    exit 1
+fi
+
+# Function to detect audio system
+detect_audio_system() {
+    # Check for PipeWire
+    if pactl info 2>/dev/null | grep -q "PipeWire"; then
+        echo "pipewire"
+    # Check for PulseAudio
+    elif pactl info &> /dev/null; then
+        echo "pulseaudio"
+    # Check for ALSA
+    elif aplay -l &> /dev/null; then
+        echo "alsa"
+    else
+        echo "none"
+    fi
+}
+
+# Function to create a virtual disk
+create_virtual_disk() {
+    # Form to create disk
+    disk_result=$(yad --form --title="Create Virtual Disk" \
+        --width=500 \
+        --field="Disk name (e.g. hd.qcow2):" "hd.qcow2" \
+        --field="Disk size:CB" "30!^10!20!30!40!50!60!80!100!120!150!200!250!300!400!500" \
+        --field="Size unit:CB" "G^G!M!T" \
+        --field="Format:CB" "qcow2^qcow2!raw!qed!vdi!vmdk!vpc" \
+        --button="Create Disk:0" \
+        --button="Cancel:1")
+
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+
+    # Extract values
+    disk_name=$(echo "$disk_result" | cut -d'|' -f1)
+    disk_size=$(echo "$disk_result" | cut -d'|' -f2)
+    size_unit=$(echo "$disk_result" | cut -d'|' -f3)
+    disk_format=$(echo "$disk_result" | cut -d'|' -f4)
+
+    # Validate disk name
+    if [ -z "$disk_name" ]; then
+        yad --error --title="Error" --text="Disk name cannot be empty."
+        return 1
+    fi
+
+    # Check if disk already exists
+    if [ -f "$disk_name" ]; then
+        yad --question --title="File Exists" \
+            --text="The file '$disk_name' already exists.\n\nDo you want to overwrite it?" \
+            --button="Overwrite:0" --button="Cancel:1"
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+    fi
+
+    # Build the creation command
+    full_size="${disk_size}${size_unit}"
+
+    # Show confirmation
+    yad --question --title="Confirm Disk Creation" \
+        --text="Create virtual disk with these parameters?\n\n• Name: $disk_name\n• Size: $full_size\n• Format: $disk_format" \
+        --button="Create:0" --button="Cancel:1"
+
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+
+    # Execute qemu-img create
+    echo "Creating virtual disk: $disk_name ($full_size, $disk_format)"
+
+    # Create progress window
+    (
+        echo "0"
+        echo "# Creating virtual disk..."
+        sleep 0.5
+        echo "50"
+        echo "# Writing disk image..."
+
+        # Execute the command
+        "$QEMU_APPIMAGE" qemu-img create -f "$disk_format" "$disk_name" "$full_size" 2>&1
+
+        if [ $? -eq 0 ]; then
+            echo "100"
+            echo "# Disk created successfully!"
+            sleep 1
+            echo "100"
+        else
+            echo "100"
+            echo "# Error creating disk!"
+            sleep 2
+            echo "100"
+        fi
+    ) | yad --progress \
+        --title="Creating Virtual Disk" \
+        --text="Initializing..." \
+        --percentage=0 \
+        --auto-close \
+        --width=400
+
+    # Check if disk was created
+    if [ -f "$disk_name" ]; then
+        yad --info --title="Success" \
+            --text="Virtual disk created successfully!\n\n• File: $disk_name\n• Size: $full_size\n• Format: $disk_format\n• Location: $(pwd)/$disk_name"
+        return 0
+    else
+        yad --error --title="Error" \
+            --text="Failed to create virtual disk.\n\nPlease check:\n• Disk space\n• Write permissions\n• QEMU AppImage functionality"
+        return 1
+    fi
+}
+
+# Main menu
+main_choice=$(yad --list --title="QEMU Launcher" \
+    --width=400 --height=200 \
+    --text="What would you like to do?" \
+    --column="Action":TEXT \
+    --column="Description":TEXT \
+    "Launch VM" "Configure and launch a virtual machine" \
+    "Create Disk" "Create a new virtual disk image" \
+    --button="Select:0" \
+    --button="Exit:1" \
+    --print-column=1)
+
+if [ $? -ne 0 ]; then
+    exit 0
+fi
+
+# Handle the choice
+case "$main_choice" in
+    "Launch VM|")
+        # Continue with VM launch
+        ;;
+    "Create Disk|")
+        create_virtual_disk
+        # Ask if user wants to launch VM after creating disk
+        yad --question --title="Launch VM?" \
+            --text="Virtual disk creation completed.\n\nDo you want to launch a VM now?" \
+            --button="Launch VM:0" --button="Exit:1"
+        if [ $? -ne 0 ]; then
+            exit 0
+        fi
+        # Continue with VM launch
+        ;;
+    *)
+        exit 0
+        ;;
+esac
+
+# Main form with all fields
+result=$(yad --form --title="QEMU Launcher - Advanced Configuration" \
+    --width=600 \
+    --field="Hard disk image (.qcow2):FL" "hd.qcow2" \
+    --field="ISO (CD-ROM) - optional:FL" "" \
+    --field="RAM (MB):NUM" "2048!64..16384!64" \
+    --field="CPU cores:NUM" "2!1..32!1" \
+    --field="Enable EFI (OVMF BIOS):CHK" "FALSE" \
+    --field="Use CPU host (-cpu host):CHK" "FALSE" \
+    --field="Boot from CD-ROM (-boot d):CHK" "TRUE" \
+    --field="Use physical disk (RAW):CHK" "FALSE" \
+    --field="Physical disk path (e.g. /dev/sda):" "" \
+    --field="Enable VirtIO GPU (3D accel):CHK" "TRUE" \
+    --field="Audio Device:CB" "virtio-sound^virtio-sound!intel-hda!AC97!none" \
+    --button="Create New Disk":2 \
+    --button="Launch QEMU:0" \
+    --button="Cancel:1")
+
+exit_code=$?
+
+# Check if "Create New Disk" button was pressed (exit code 2)
+if [ $exit_code -eq 2 ]; then
+    create_virtual_disk
+    # After creating disk, restart the script
+    exec "$0"
+elif [ $exit_code -ne 0 ]; then
+    exit 0
+fi
+
+# Extract values (separated by '|')
+hda=$(echo "$result" | cut -d'|' -f1)
+iso=$(echo "$result" | cut -d'|' -f2)
+ram=$(echo "$result" | cut -d'|' -f3)
+cores=$(echo "$result" | cut -d'|' -f4)
+efi=$(echo "$result" | cut -d'|' -f5)      # TRUE/FALSE
+cpu_host=$(echo "$result" | cut -d'|' -f6) # TRUE/FALSE
+boot_cd=$(echo "$result" | cut -d'|' -f7)  # TRUE/FALSE
+use_phys_disk=$(echo "$result" | cut -d'|' -f8)  # TRUE/FALSE
+phys_disk_path=$(echo "$result" | cut -d'|' -f9)
+enable_virtio_gpu=$(echo "$result" | cut -d'|' -f10)  # TRUE/FALSE
+audio_device=$(echo "$result" | cut -d'|' -f11)       # Audio device selection
+
+# Validate ISO only if a path was provided
+if [ -n "$iso" ] && [ ! -f "$iso" ]; then
+    yad --error --title="Error" --text="ISO file not found:\n$iso"
+    exit 1
+fi
+
+# Validate hard disk image file (just a warning)
+if [ ! -f "$hda" ]; then
+    yad --warning --title="Warning" --text="Hard disk file '$hda' does not exist.\n\nYou can:\n• Create it with 'Create New Disk' button\n• Continue and it will fail\n• Select an existing disk file"
+fi
+
+# Validate EFI: if checked, check if BIOS file exists
+if [ "$efi" = "TRUE" ]; then
+    if [ ! -f "$BIOS_FILE" ]; then
+        yad --error --title="Error" --text="EFI BIOS file not found:\n$BIOS_FILE\n\nPlease check the path or download OVMF_X64.fd"
+        exit 1
+    fi
+fi
+
+# Validate physical disk: if checked, check that the path is not empty
+if [ "$use_phys_disk" = "TRUE" ]; then
+    if [ -z "$phys_disk_path" ]; then
+        yad --error --title="Error" --text="You checked 'Use physical disk' but did not specify a path.\nExample: /dev/sda"
+        exit 1
+    fi
+    if [ ! -e "$phys_disk_path" ]; then
+        yad --warning --title="Warning" --text="Physical device '$phys_disk_path' does not exist.\nPlease verify the path."
+    fi
+    # Additional security warning
+    yad --question --title="⚠️ Caution with physical disk" \
+        --text="You are about to attach the device '$phys_disk_path' to the virtual machine.\n\n⚠️ Make sure it is NOT the host system disk\n   and that no system is using it.\n\nDo you want to continue?" \
+        --button="Continue:0" --button="Cancel:1"
+    if [ $? -ne 0 ]; then
+        exit 0
+    fi
+fi
+
+# Detect audio system and validate
+audio_system=$(detect_audio_system)
+
+if [ "$audio_device" != "none" ]; then
+    case $audio_system in
+        "pipewire")
+            echo "PipeWire detected - Using PipeWire/PulseAudio compatible backend"
+            ;;
+        "pulseaudio")
+            echo "PulseAudio detected"
+            ;;
+        "alsa")
+            echo "ALSA detected - Audio might have limitations"
+            ;;
+        "none")
+            yad --warning --title="Warning" --text="No audio system detected.\nAudio will be disabled."
+            audio_device="none"
+            ;;
+    esac
+fi
+
+# Build the command in an array
+cmd=("$QEMU_APPIMAGE" "-enable-kvm" "-m" "$ram" "-smp" "$cores")
+
+# Add VirtIO GPU with OpenGL support
+if [ "$enable_virtio_gpu" = "TRUE" ]; then
+    cmd+=("-device" "virtio-vga-gl")
+    cmd+=("-display" "gtk,gl=on")
+else
+    # If VirtIO GPU is not used, use the default configuration
+    cmd+=("-vga" "std")
+    cmd+=("-display" "gtk")
+fi
+
+# Add audio support based on selection (virtio-sound as default)
+case "$audio_device" in
+    "intel-hda")
+        # Intel HDA - More compatible, works with PipeWire
+        cmd+=("-device" "intel-hda")
+        cmd+=("-device" "hda-duplex")
+        if [ "$audio_system" = "pipewire" ] || [ "$audio_system" = "pulseaudio" ]; then
+            cmd+=("-audiodev" "pa,id=audio0")
+        else
+            cmd+=("-audiodev" "alsa,id=audio0")
+        fi
+        echo "Using Intel HDA audio device"
+        ;;
+    "AC97")
+        # AC97 - Buena compatibilidad
+        cmd+=("-device" "AC97")
+        if [ "$audio_system" = "pipewire" ] || [ "$audio_system" = "pulseaudio" ]; then
+            cmd+=("-audiodev" "pa,id=audio0")
+        else
+            cmd+=("-audiodev" "alsa,id=audio0")
+        fi
+        echo "Using AC97 audio device"
+        ;;
+    "virtio-sound")
+        # VirtIO Sound - Default option, requiere drivers especiales en el invitado
+        cmd+=("-device" "virtio-sound-pci,audiodev=audio0")
+        if [ "$audio_system" = "pipewire" ] || [ "$audio_system" = "pulseaudio" ]; then
+            cmd+=("-audiodev" "pa,id=audio0")
+        else
+            cmd+=("-audiodev" "alsa,id=audio0")
+        fi
+        echo "Using VirtIO Sound device (default, requires guest drivers)"
+        ;;
+    "none")
+        echo "Audio disabled"
+        ;;
+    *)
+        # Default to VirtIO Sound
+        cmd+=("-device" "virtio-sound-pci,audiodev=audio0")
+        if [ "$audio_system" = "pipewire" ] || [ "$audio_system" = "pulseaudio" ]; then
+            cmd+=("-audiodev" "pa,id=audio0")
+        fi
+        echo "Using default VirtIO Sound audio device"
+        ;;
+esac
+
+# Add hard disk image
+cmd+=("-hda" "$hda")
+
+# Add CD-ROM only if ISO is provided and exists (already validated)
+if [ -n "$iso" ]; then
+    cmd+=("-cdrom" "$iso")
+fi
+
+# Boot option only if enabled
+if [ "$boot_cd" = "TRUE" ]; then
+    cmd+=("-boot" "d")
+fi
+
+# EFI option
+if [ "$efi" = "TRUE" ]; then
+    cmd+=("-bios" "$BIOS_FILE")
+fi
+
+# CPU host option
+if [ "$cpu_host" = "TRUE" ]; then
+    cmd+=("-cpu" "host")
+fi
+
+# Physical disk option (raw)
+if [ "$use_phys_disk" = "TRUE" ]; then
+    cmd+=("-drive" "file=$phys_disk_path,format=raw,media=disk,cache=none")
+fi
+
+# Add network support
+cmd+=("-netdev" "user,id=net0")
+cmd+=("-device" "virtio-net-pci,netdev=net0")
+
+# Show command to be executed for confirmation
+command_str="${cmd[@]}"
+yad --question --title="Confirm Launch" \
+    --text="The following command will be executed:\n\n$command_str\n\nAudio: $audio_device (Host: $audio_system)\n\nDo you want to continue?" \
+    --button="Execute:0" --button="Cancel:1"
+
+if [ $? -eq 0 ]; then
+    # Execute QEMU
+    "${cmd[@]}"
+else
+    exit 0
+fi
