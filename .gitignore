@@ -1,3 +1,5 @@
 QEMU-x86_64.AppImage
 .zig-cache
 zig-out
+ZigVMU-portable.tar
+zigvmu
