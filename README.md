@@ -1,4 +1,5 @@
 # ZigVMU
+<img width="414" height="355" alt="image" src="https://github.com/user-attachments/assets/6f2eac3d-09d2-46c4-a999-c104035f9f5c" />
 
 A graphical **QEMU virtual machine launcher** written in **Zig** with a GTK3 interface.
 
